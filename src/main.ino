@@ -26,13 +26,13 @@
 
 // параметры светодиодов
 #define NUM_LEDS 5
-#define DATA_PIN 6
+#define DATA_PIN 13
 
-volatile boolean LEDHdlts;
-volatile boolean LED_TEST;
+volatile boolean LED_ON;
 volatile boolean low_power;
 int battery_pin = A4;
 volatile boolean isStopped;
+volatile int led_hue = 0;
 unsigned long time;
 
 // (тип, пин, ШИМ пин, уровень)
@@ -49,7 +49,6 @@ Thread batteryThread = Thread();
 CRGB leds[NUM_LEDS];
 void setup()
 {
-  pinMode(LED_BUILTIN, OUTPUT);
 
   mainThread.onRun(car);
   mainThread.setInterval(20);
@@ -87,29 +86,32 @@ void car()
   ps2x.reconfig_gamepad();                    // костыль https://stackoverflow.com/questions/46493222/why-arduino-needs-to-be-restarted-after-ps2-controller-communication-in-arduino
   if (success)
   {
-    if (ps2x.ButtonPressed(PSB_GREEN)) // Triangle pressed
+    if (ps2x.Button(PSB_L1))
     {
-      LEDHdlts = !LEDHdlts;
+      if (led_hue < 240)
+      {
+        led_hue += 3;
+      }
+      else
+      {
+        led_hue = 0;
+      }
     }
-    if (ps2x.ButtonPressed(PSB_R1)) // X pressed
+    if (ps2x.ButtonPressed(PSB_R1))
     {
-      LED_TEST = !LED_TEST;
+      LED_ON = !LED_ON;
     }
-    if (LED_TEST)
+    if (LED_ON)
     {
       for (int i = 0; i < NUM_LEDS; i++)
       {
-        leds[i] = CRGB::Red;
+        leds[i].setHue(led_hue);
       }
       FastLED.show();
     }
     else
     {
-      for (int i = 0; i < NUM_LEDS; i++)
-      {
-        leds[i] = CRGB::Black;
-      }
-      FastLED.show();
+      off_leds();
     }
     int LX = map(ps2x.Analog(PSS_RX), 255, 0, -255, 255);
     int LY = map(ps2x.Analog(PSS_LY), 255, 0, -255, 255);
@@ -124,14 +126,22 @@ void car()
     {
       time = millis();
     }
-    digitalWrite(LED_BUILTIN, LEDHdlts);
   }
   else
   {
     motorR.setSpeed(0);
     motorL.setSpeed(0);
     digitalWrite(LED_BUILTIN, LOW);
+    off_leds();
   }
+}
+void off_leds()
+{
+  for (int i = 0; i < NUM_LEDS; i++)
+  {
+    leds[i].setRGB(0, 0, 0);
+  }
+  FastLED.show();
 }
 void loop()
 {
