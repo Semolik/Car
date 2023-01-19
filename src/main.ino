@@ -24,15 +24,27 @@
 #define CLK 12
 #define DIO 11
 
-// параметры светодиодов
+// подсветка
 #define NUM_LEDS 5
 #define DATA_PIN 13
-
+CRGB leds[NUM_LEDS];
 volatile boolean LED_ON;
-volatile boolean low_power;
-int battery_pin = A4;
-volatile boolean isStopped;
 volatile int led_hue = 0;
+// фары
+
+#define HEADLIGHT_PIN 6  // led
+#define TAIL_LIGHT_PIN 7 // ws2812b
+#define TAIL_LIGHT_LED_COUNT 3
+CRGB tail_light_leds[TAIL_LIGHT_LED_COUNT];
+volatile boolean lights_on = false;
+
+// батарея
+#define BATTERY_PIN A4
+
+// светодиод индикатор
+#define LOW_POWER_LED 8
+volatile boolean low_power;
+
 unsigned long time;
 
 // (тип, пин, ШИМ пин, уровень)
@@ -46,18 +58,17 @@ GyverTM1637 disp(CLK, DIO);
 Thread mainThread = Thread();
 Thread batteryThread = Thread();
 
-CRGB leds[NUM_LEDS];
 void setup()
 {
+  Serial.begin(9600);
+  disp.clear();
+  disp.brightness(7);
 
   mainThread.onRun(car);
   mainThread.setInterval(20);
 
   batteryThread.onRun(buttory_check);
   batteryThread.setInterval(1000);
-
-  disp.clear();
-  disp.brightness(7);
 
   motorR.setMode(AUTO);
   motorL.setMode(AUTO);
@@ -74,14 +85,16 @@ void setup()
   low_power = battery_percentage() < 10;
 
   FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, NUM_LEDS);
+  FastLED.addLeds<NEOPIXEL, TAIL_LIGHT_PIN>(tail_light_leds, TAIL_LIGHT_LED_COUNT);
 }
 
 void car()
 {
-  if ((millis() - time > 10000) && (battery_percentage() < 10))
+  if ((millis() - time) > 10000 && battery_percentage() < 10)
   {
     low_power = true;
   }
+
   bool success = ps2x.read_gamepad(false, 0); // читаем
   ps2x.reconfig_gamepad();                    // костыль https://stackoverflow.com/questions/46493222/why-arduino-needs-to-be-restarted-after-ps2-controller-communication-in-arduino
   if (success)
@@ -90,7 +103,7 @@ void car()
     {
       if (led_hue < 240)
       {
-        led_hue += 3;
+        led_hue += 2;
       }
       else
       {
@@ -101,6 +114,11 @@ void car()
     {
       LED_ON = !LED_ON;
     }
+    if (ps2x.ButtonPressed(PSB_CIRCLE))
+    {
+      lights_on = !lights_on;
+    }
+
     if (LED_ON)
     {
       for (int i = 0; i < NUM_LEDS; i++)
@@ -108,6 +126,14 @@ void car()
         leds[i].setHue(led_hue);
       }
       FastLED.show();
+      if (!lights_on)
+      {
+        for (int i = 0; i < TAIL_LIGHT_LED_COUNT; i++)
+        {
+          tail_light_leds[i].setHue(led_hue);
+        }
+        FastLED.show();
+      }
     }
     else
     {
@@ -118,22 +144,51 @@ void car()
 
     float dutyR = constrain(LX, -255, 255);
     float dutyL = constrain(LY, -255, 255);
+    if (lights_on)
+    {
+      uint8_t brightness = 50;
+      uint8_t brightness_tail = brightness;
+      uint8_t brightness_headlight = brightness;
+
+      if (dutyL < -1)
+      {
+        brightness_tail = map(dutyL, -1, -255, brightness, 255);
+      }
+      else if (dutyL > 1)
+      {
+        brightness_headlight = map(dutyL, 1, 255, brightness, 255);
+      }
+      for (int i = 0; i < TAIL_LIGHT_LED_COUNT; i++)
+      {
+        tail_light_leds[i].setRGB(brightness_tail, 0, 0);
+      }
+      FastLED.show();
+      Serial.println(brightness_headlight);
+      analogWrite(HEADLIGHT_PIN, brightness_headlight);
+    }
+    else
+    {
+      analogWrite(HEADLIGHT_PIN, 0);
+    }
 
     motorR.smoothTick(dutyR == -1 ? 0 : dutyR);
     motorL.smoothTick(dutyL == -1 ? 0 : dutyL);
 
-    if (dutyR == -1 && dutyL == -1)
+    if (dutyR != -1 || dutyL != -1)
     {
       time = millis();
     }
   }
   else
   {
-    motorR.setSpeed(0);
-    motorL.setSpeed(0);
-    digitalWrite(LED_BUILTIN, LOW);
-    off_leds();
+    off_all();
   }
+}
+void off_all()
+{
+  motorR.setSpeed(0);
+  motorL.setSpeed(0);
+  off_leds();
 }
 void off_leds()
 {
@@ -142,6 +197,14 @@ void off_leds()
     leds[i].setRGB(0, 0, 0);
   }
   FastLED.show();
+  if (!lights_on)
+  {
+    for (int i = 0; i < TAIL_LIGHT_LED_COUNT; i++)
+    {
+      tail_light_leds[i].setRGB(0, 0, 0);
+    }
+    FastLED.show();
+  }
 }
 void loop()
 {
@@ -149,6 +212,11 @@ void loop()
   {
     mainThread.run();
   }
+  else if (low_power)
+  {
+    off_all();
+  }
+  digitalWrite(LOW_POWER_LED, low_power ? HIGH : LOW);
 
   if (batteryThread.shouldRun())
   {
@@ -169,19 +237,18 @@ void buttory_check()
 }
 int battery_percentage()
 {
-
-  int output = 0;                 // output value
-  const float battery_max = 4.20; // maximum voltage of battery
-  const float battery_min = 3.0;  // minimum voltage of battery before shutdown
-
-  // calculate the voltage
-  float voltage = (analogRead(battery_pin) * 5.0) / 1023.0; // for default reference voltage
-  // round value by two precision
-  voltage = roundf(voltage * 100) / 100;
-
-  output = ((voltage - battery_min) / (battery_max - battery_min)) * 100;
-  if (output < 100)
-    return output;
+  float voltage = ((analogRead(BATTERY_PIN) * 5.0) / 1023.0) + 0.2; // for default reference voltage
+  voltage = voltage * 10;
+  int bat_percent;
+  if (voltage >= 42)
+    bat_percent = 100;
+  else if (voltage >= 41) // 90-100% range
+    bat_percent = map(voltage, 41, 42, 90, 100);
+  else if (voltage >= 37) // 10-90% range
+    bat_percent = map(voltage, 37, 41, 10, 90);
+  else if (voltage >= 36) // 0-10% range
+    bat_percent = map(voltage, 36, 37, 0, 10);
   else
-    return 100.0;
+    bat_percent = 0;
+  return bat_percent;
 }
