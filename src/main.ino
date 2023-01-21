@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <GyverMotor.h>
-#include <Thread.h>
 #include <PS2X_lib.h>
 #include <GyverTM1637.h>
 #include <FastLED.h>
@@ -23,13 +22,6 @@
 // пины дисплея
 #define CLK 12
 #define DIO 11
-
-// подсветка
-#define NUM_LEDS 5
-#define DATA_PIN 13
-CRGB leds[NUM_LEDS];
-volatile boolean LED_ON;
-volatile int led_hue = 0;
 // фары
 
 #define HEADLIGHT_PIN 6  // led
@@ -37,6 +29,18 @@ volatile int led_hue = 0;
 #define TAIL_LIGHT_LED_COUNT 3
 CRGB tail_light_leds[TAIL_LIGHT_LED_COUNT];
 volatile boolean lights_on = false;
+// подсветка
+#define NUM_LEDS 5
+#define DATA_PIN 13
+CRGB leds[NUM_LEDS];
+volatile boolean LED_ON;
+volatile int led_hue = 0;
+volatile boolean animation = false;
+volatile boolean running_fire = false;
+volatile int running_fire_leds = NUM_LEDS + TAIL_LIGHT_LED_COUNT - 1;
+volatile int current_running_fire_led = 0;
+unsigned long running_fire_timer;
+volatile double led_brightness = 255;
 
 // батарея
 #define BATTERY_PIN A4
@@ -45,7 +49,7 @@ volatile boolean lights_on = false;
 #define LOW_POWER_LED 8
 volatile boolean low_power;
 
-unsigned long time;
+unsigned long time = millis() + 10000;
 
 // (тип, пин, ШИМ пин, уровень)
 GMotor motorR(DRIVER2WIRE, MOT_RA, MOT_RB, HIGH);
@@ -55,20 +59,11 @@ PS2X ps2x;
 
 GyverTM1637 disp(CLK, DIO);
 
-Thread mainThread = Thread();
-Thread batteryThread = Thread();
-
 void setup()
 {
   Serial.begin(9600);
   disp.clear();
   disp.brightness(7);
-
-  mainThread.onRun(car);
-  mainThread.setInterval(20);
-
-  batteryThread.onRun(buttory_check);
-  batteryThread.setInterval(1000);
 
   motorR.setMode(AUTO);
   motorL.setMode(AUTO);
@@ -90,25 +85,62 @@ void setup()
 
 void car()
 {
-  if ((millis() - time) > 10000 && battery_percentage() < 10)
+  if ((millis() - time) > 10000)
   {
-    low_power = true;
+    int percentage = battery_percentage();
+    disp.displayInt(percentage);
+    if (percentage < 10)
+    {
+      low_power = true;
+    }
   }
-
+  else
+  {
+    disp.clear();
+  }
   bool success = ps2x.read_gamepad(false, 0); // читаем
   ps2x.reconfig_gamepad();                    // костыль https://stackoverflow.com/questions/46493222/why-arduino-needs-to-be-restarted-after-ps2-controller-communication-in-arduino
   if (success)
   {
-    if (ps2x.Button(PSB_L1))
+    if (ps2x.Button(PSB_PAD_LEFT) || animation)
     {
-      if (led_hue < 240)
+      if (led_hue < 255)
       {
-        led_hue += 2;
+        led_hue += 3;
       }
-      else
+      if (led_hue >= 255)
       {
         led_hue = 0;
       }
+    }
+    if (!animation && ps2x.Button(PSB_PAD_RIGHT))
+    {
+      if (led_hue > 0)
+      {
+        led_hue -= 3;
+      }
+      if (led_hue <= 0)
+      {
+        led_hue = 255;
+      }
+    }
+    if (ps2x.Button(PSB_PAD_UP))
+    {
+      if (led_brightness < 255)
+      {
+        led_brightness += 3;
+      }
+    }
+    if (ps2x.Button(PSB_PAD_DOWN))
+    {
+      if (led_brightness > 9)
+      {
+        led_brightness -= 3;
+      }
+    }
+    if (ps2x.ButtonPressed(PSB_TRIANGLE))
+    {
+      animation = !animation;
     }
     if (ps2x.ButtonPressed(PSB_R1))
     {
@@ -118,21 +150,66 @@ void car()
     {
       lights_on = !lights_on;
     }
-
+    if (ps2x.ButtonPressed(PSB_SQUARE))
+    {
+      running_fire = !running_fire;
+    }
     if (LED_ON)
     {
-      for (int i = 0; i < NUM_LEDS; i++)
+      if (running_fire)
       {
-        leds[i].setHue(led_hue);
-      }
-      FastLED.show();
-      if (!lights_on)
-      {
-        for (int i = 0; i < TAIL_LIGHT_LED_COUNT; i++)
+        if (millis() - running_fire_timer > 100)
         {
-          tail_light_leds[i].setHue(led_hue);
+          running_fire_timer = millis();
+          off_leds();
+          Serial.println(current_running_fire_led);
+          if (current_running_fire_led < running_fire_leds)
+          {
+            if (current_running_fire_led < NUM_LEDS)
+            {
+              leds[current_running_fire_led].setHSV(led_hue, 255, led_brightness);
+            }
+            else
+            {
+
+              if (current_running_fire_led == running_fire_leds - 1)
+              {
+                tail_light_leds[0].setHSV(led_hue, 255, 0);
+                tail_light_leds[1].setHSV(led_hue, 255, led_brightness);
+                tail_light_leds[2].setHSV(led_hue, 255, 0);
+              }
+              else
+              {
+                tail_light_leds[0].setHSV(led_hue, 255, led_brightness);
+                tail_light_leds[1].setHSV(led_hue, 255, 0);
+                tail_light_leds[2].setHSV(led_hue, 255, led_brightness);
+              }
+            }
+
+            current_running_fire_led++;
+          }
+          else
+          {
+            current_running_fire_led = 0;
+          }
+          FastLED.show();
+        }
+      }
+      else
+      {
+        for (int i = 0; i < NUM_LEDS; i++)
+        {
+          leds[i].setHSV(led_hue, 255, led_brightness);
         }
         FastLED.show();
+        if (!lights_on)
+        {
+          for (int i = 0; i < TAIL_LIGHT_LED_COUNT; i++)
+          {
+            tail_light_leds[i].setHSV(led_hue, 255, led_brightness);
+          }
+          FastLED.show();
+        }
       }
     }
     else
@@ -208,33 +285,17 @@ void off_leds()
 }
 void loop()
 {
-  if (!low_power && mainThread.shouldRun())
+  if (!low_power)
   {
-    mainThread.run();
+    car();
   }
   else if (low_power)
   {
     off_all();
   }
   digitalWrite(LOW_POWER_LED, low_power ? HIGH : LOW);
-
-  if (batteryThread.shouldRun())
-  {
-    batteryThread.run();
-  }
 }
 
-void buttory_check()
-{
-  if (low_power)
-  {
-    disp.displayInt(battery_percentage());
-  }
-  else
-  {
-    disp.clear();
-  }
-}
 int battery_percentage()
 {
   float voltage = ((analogRead(BATTERY_PIN) * 5.0) / 1023.0) + 0.2; // for default reference voltage
